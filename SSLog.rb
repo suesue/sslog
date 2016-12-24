@@ -1,6 +1,8 @@
 #!/usr/bin/ruby
 # -*- coding: utf-8 -*-
 
+require 'time'
+
 module SS
 module Text
 
@@ -189,20 +191,70 @@ end
 
 
 class ParserContext
-	attr_accessor :last_entry
+	attr_accessor :last
+	attr_reader :current
 	attr_accessor :input
 
 
-	def reset
-		@last_entry = nil
-		@values = nil
+	def read
+		raise unless @input
+		raise unless block_given?
+		reset
+		@input.read do |line|
+			yield line
+		end
+		self
 	end
 
-	def new_entry
-		Entry.new
+	def reset
+		@last = nil
+		@current = nil
+		@values = nil
+		self
+	end
+
+	def discard
+		@last = nil
+		@current = nil
+		self
+	end
+
+	def stay( enty = nil )
+		# do nothing
+		self
+	end
+
+	def append( line )
+		if @last then
+			@last.append_line line
+		end
+		self
+	end
+
+	def forward( entry = @current )
+		if @last then
+			push
+		end
+		@last = entry
+		@current = nil
+		self
+	end
+
+	def push( entry = @last )
+		self << entry if entry
 	end
 
 	def <<( entry )
+		self
+	end
+
+	def new_entry
+		entry = Entry.new
+		@current = entry
+		entry
+	end
+
+	def commit
 		self
 	end
 
@@ -215,37 +267,25 @@ class ParserContext
 		@values[ key ] = value
 	end
 
-	def commit
-	end
-
 end
 
 
 class Parser
 
 	def parse( context, &block )
-		raise unless context.input
-		context.reset
-		context.input.read do |line|
+		context.read do |line|
 			entry = read_next( context, line )
 			if entry == line then
-				next unless context.last_entry # ignore
-				context.last_entry.append_line line
+				context.append entry
 			elsif entry.kind_of?( Entry ) then
-				if context.last_entry then
-					context << context.last_entry
-				end
-				context.last_entry = entry
+				context.forward entry
 			elsif entry.nil? then
-				context.last_entry = nil
+				context.discard
 			else
-				; # do nothing
+				context.stay entry
 			end
 		end
-		if context.last_entry then
-			context << context.last_entry
-			context.last_entry = nil
-		end
+		context.forward
 		context.commit
 	end
 

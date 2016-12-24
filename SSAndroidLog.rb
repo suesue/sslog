@@ -1,7 +1,7 @@
 #!/usr/bin/ruby
 # -*- coding: utf-8 -*-
 
-require 'SSLog'
+require "#{File.dirname(__FILE__)}/SSLog"
 
 
 module SS
@@ -40,23 +40,22 @@ class Entry < SS::Log::Entry
 	end
 
 	def read( line )
-		l = line.text.chomp
-		case l
-		when /\A(\d+-\d+ \d+:\d+:\d+\.\d+) (\S)\/(.+)\(\s*(\d+)\): (.*)\z/ then
-			@timestamp = DateTime.strptime( $1, "%y-%m-%d %H:%M:%S" )
+		case line.text
+		when /\A(\d+-\d+ \d+:\d+:\d+)\.\d+ (\S)\/(.+)\(\s*(\d+)\): (.*)[\r\n]*\z/ then
+			@timestamp = DateTime.strptime( $1, "%m-%d %H:%M:%S" )
 			@level = to_level( $2 )
 			@tag = $3
 			pid = $4.to_i
-			@entity = Enity.new( pid, nil, nil, nil )
+			@entity = Entity.new( pid, nil, nil, nil )
 			@message = $5
-		when /\A(\d+-\d+ \d+:\d+:\d+\.\d+) (\d+)-(\d+)\/(\S+) (\S)\/([^:]+): (.*)\z/ then
-			@timestamp = DateTime.strptime( $1, "%y-%m-%d %H:%M:%S" )
+		when /\A(\d+-\d+ \d+:\d+:\d+)\.\d+ (\d+)-(\d+)\/(\S+) (\S)\/([^:]+): (.*)[\r\n]*\z/ then
+			@timestamp = DateTime.strptime( $1, "%m-%d %H:%M:%S" )
 			@level = to_level( $5 )
 			@tag = $6
 			pid = $2.to_i
 			@message = $7
 			package_name = $4
-			@entity = Enity.new( pid, package_name, nil, nil )
+			@entity = Entity.new( pid, package_name, nil, nil )
 		else
 			#raise "!!! ##{line.number}: #{line.text}"
 #puts line.text
@@ -89,8 +88,8 @@ class Entry < SS::Log::Entry
 				#puts "start proc ???"
 #puts "#{@message}"
 			end
-			entity = Enity.new( spid, package_name, entity_name, entity_type )
-			EnityStartLogEntry.new( entity, self )
+			entity = Entity.new( spid, package_name, entity_name, entity_type )
+			EntityStartLogEntry.new( entity, self )
 		else
 			self
 		end
@@ -123,7 +122,7 @@ class Entry < SS::Log::Entry
 end
 
 
-class Enity
+class Entity
 	attr_reader :pid
 	attr_reader :package_name
 	attr_reader :name
@@ -138,13 +137,13 @@ class Enity
 	end
 
 	def to_s
-		"Android Enity { PID = #{@pid}, package name = #{@package_name}, name = #{@name}, type = #{@type} }"
+		"Android Entity { PID = #{@pid}, package name = #{@package_name}, name = #{@name}, type = #{@type} }"
 	end
 
 end
 
 
-class EnityStartLogEntry < Entry
+class EntityStartLogEntry < Entry
 	attr_reader :target_entity
 
 
@@ -154,13 +153,13 @@ class EnityStartLogEntry < Entry
 	end
 
 	def to_s
-		"Android Enity Start Log Entry { target entity = #{@target_entity}, timestamp = #{@timestamp}, level = #{@level}, mark = #{@mark}, tag = #{@tag}, entity = #{@entity}, message = #{@message}, line = #{@line} }"
+		"Android Entity Start Log Entry { target entity = #{@target_entity}, timestamp = #{@timestamp}, level = #{@level}, mark = #{@mark}, tag = #{@tag}, entity = #{@entity}, message = #{@message}, line = #{@line} }"
 	end
 
 end
 
 
-class LogParser < SS::Log::LogParser
+class LogParser < SS::Log::Parser
 
 	def read_next( context, line )
 		l = line.text.chomp
@@ -170,9 +169,9 @@ class LogParser < SS::Log::LogParser
 			nil
 		elsif l =~ /\A--------- beginning of (.+)$/ then
 			mark = LogBlockMark.new( $1.to_sym )
-			if context.last_entry then
-				context << context.last_entry
-				context.last_entry = nil
+			if context.last then
+				context.push
+				context.discard
 			end
 			context[ :mark ] = mark
 			mark
@@ -204,12 +203,12 @@ class ApkLogContext < SS::Log::ParserContext
 
 	def <<( entry )
 		if entry.nil? then
-		elsif entry.kind_of?( EnityStartLogEntry ) then
+		elsif entry.kind_of?( EntityStartLogEntry ) then
 			# service start
 			package_name = entry.target_entity.package_name
 			unless @system_process then
-				name = entry.entry.package_name ? entry.entry.package_name: 'system_process'
-				@system_process = Enity.new( entry.entry.pid, name, nil, nil )
+				name = entry.entity.package_name ? entry.entity.package_name: 'system_process'
+				@system_process = Entity.new( entry.entity.pid, name, nil, nil )
 			end
 #puts "A-0; ##{entry.line.number}; #{entry.target_entity.package_name}<br>"
 			if @target_packages.include?( entry.target_entity.package_name ) then
@@ -246,15 +245,12 @@ class ApkLogContext < SS::Log::ParserContext
 #			end
 			if entity then
 #puts "B-2 #{entry.line.number}: entity = #{entity}"
-				if entity then
-#puts "B-3 #{entry.line.number}"
-					if @last_pid and @last_pid != entity.pid then
+				if @last_pid and @last_pid != entity.pid then
 #puts "B-4 #{entry.line.number}"
-						write
-					end
-					@last_pid = entity.pid
-					@temp << entry
+					write
 				end
+				@last_pid = entity.pid
+				@temp << entry
 			end
 		end
 		self
@@ -384,7 +380,7 @@ SQL
 			@in_transaction = true
 		end
 
-		if entry.kind_of?( EnityStartLogEntry ) then
+		if entry.kind_of?( EntityStartLogEntry ) then
 			@db.execute "INSERT INTO entity (pid, package_name, name, type) VALUES (?, ?, ?, ?)",
 				entry.target_entity.pid,
 				entry.target_entity.package_name,
@@ -451,7 +447,7 @@ end
 
 
 def main( args )
-	iclude SS::Android
+	include SS::Android
 
 	option = SS::CommandLine::Option.new( args ).parse
 
@@ -464,31 +460,42 @@ def main( args )
 		return
 	end
 
+	context = nil
 	output = option.of( 'output' )
-	case output
-	when "html"
-		context = ApkLogContext.new
+	output.each do |o|
+		case output
+		when "html"
+			context = ApkLogContext.new
 
-		package_names = option.of( 'package-names' )
-		if package_names then
-			package_names.each do |name|
-				context.target_packages << name
+			package_names = option.of( 'package-names' )
+			if package_names then
+				package_names.each do |name|
+					context.target_packages << name
+				end
+			else
+				context.target_packages << 'x.x.x'
+				context.target_packages << 'y.y.y'
+				context.target_packages << 'system_process'
 			end
+		when "db"
+			context = Store.new
 		else
-			context.target_packages << 'x.x.x'
-			context.target_packages << 'y.y.y'
-			context.target_packages << 'system_process'
+			context = Store.new
 		end
-	when "db"
-		context = Store.new
-	else
-		context = Store.new
-	end
+	end if output
 
 	input = option.of( 'input' )
-	context.input = input ? SS::Text::File.new( input ): SS::Text::Stream.new( STDIN )
-
-	LogParser.new.parse context
+	connect = option.of( 'connect' )
+	if input then
+		input.each do |s|
+			context.input = SS::Text::File.new( s )
+			LogParser.new.parse context
+		end
+	elsif connect then
+	else
+		context.input = SS::Text::Stream.new( STDIN )
+		LogParser.new.parse context
+	end
 end
 
 
