@@ -167,6 +167,11 @@ class Entry
 	end
 
 	def update
+		self
+	end
+
+	def to_hash
+		{ :timestamp => @timestamp, :level => @level, :tag => @tag, :message => @message, :line => @line }
 	end
 
 	def to_s
@@ -178,20 +183,35 @@ end
 
 class Thread
 
-	def accept?( entry )
-		return false unless entry
-	end
-
 	def <<( entry )
 		@entries ||= []
 		@entries << entry
+		self
+	end
+
+	def fix
+		self
+	end
+
+end
+
+
+class ThreadFilter
+
+	def accept?( entry )
+		entry ? true: false
+	end
+
+	def new_thread
+#puts "#{self.class.name}#new_thread: called"
+		Thread.new
 	end
 
 end
 
 
 class ParserContext
-	attr_accessor :last
+	attr_reader :last
 	attr_reader :current
 	attr_accessor :input
 
@@ -219,7 +239,7 @@ class ParserContext
 		self
 	end
 
-	def stay( enty = nil )
+	def stay( entry = nil )
 		# do nothing
 		self
 	end
@@ -264,7 +284,42 @@ class ParserContext
 
 	def []=( key, value )
 		@values ||= {}
+		old = @values[ key ]
 		@values[ key ] = value
+		old
+	end
+
+end
+
+
+class MultiParserContext < ParserContext
+
+	def +( context )
+		@list ||= []
+		@list << context
+		self
+	end
+
+	def reset
+		@list.each do |context|
+			context.reset
+		end if @list
+		self
+	end
+
+	def <<( entry )
+		return self unless @list
+		@list.each do |context|
+			context << entry
+		end
+		self
+	end
+
+	def commit
+		@list.each do |context|
+			context.commit
+		end if @list
+		self
 	end
 
 end
@@ -291,6 +346,82 @@ class Parser
 
 	def read_next( context, line )
 		context.new_entry.read( line )
+	end
+
+end
+
+
+class Store < ParserContext
+	require 'sqlite3'
+
+
+	def initialize( path = "log.db" )
+		raise unless path
+		@path = path
+		@limit = 1000
+	end
+
+	def reset
+		super
+
+		@counter = 0
+		@db = nil
+		@db = SQLite3::Database.new( @path )
+
+		create
+
+		@in_transaction = false
+	end
+
+	def <<( entry )
+		unless @in_transaction then
+			@db.transaction
+			@in_transaction = true
+		end
+
+		insert entry
+
+		@counter += 1
+		if @counter >= @limit then
+			@db.commit
+			@counter = 0
+			@in_transaction = false
+		end
+
+		self
+	end
+
+	def create
+		@db.execute <<SQL
+CREATE TABLE IF NOT EXISTS log (
+line_no,
+line,
+at,
+tag,
+level,
+message
+);
+SQL
+	end
+
+	def insert( entry )
+		@db.execute "INSERT INTO log (line_no, line, at, tag, level, message) VALUES (?, ?, ?, ?, ?, ?)",
+			entry.line.number,
+			entry.line.text,
+			entry.timestamp ? entry.timestamp.strftime("%Y-%m-%d %H:%M:%S"): nil,
+			entry.tag,
+			entry.level ? entry.level.to_s: nil,
+			entry.message
+
+		self
+	end
+
+	def commit
+		if @counter > 0 then
+			@db.commit
+			@counter = 0
+		end
+		@db.close
 	end
 
 end
@@ -322,7 +453,9 @@ class Option
 				next
 			end
 
-			if arg =~ /\A--(.+)\z/ then
+			if arg =~ /\A---+/ then
+				raise
+			elsif arg =~ /\A--(.+)\z/ then
 				if name and values.nil? then
 					named[ name ] = []
 				end
@@ -334,6 +467,8 @@ class Option
 				name = nil
 				values = nil
 				next
+			elsif arg =~ /\A-(.+)\z/ then
+				raise
 			elsif name then
 				unless values then
 					values = []

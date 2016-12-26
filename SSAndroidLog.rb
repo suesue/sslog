@@ -25,7 +25,7 @@ class LogBlockMark
 end
 
 
-class Entry < SS::Log::Entry
+class LogEntry < SS::Log::Entry
 	attr_reader :entity
 	attr_reader :mark
 
@@ -115,6 +115,13 @@ class Entry < SS::Log::Entry
 		end
 	end
 
+	def to_hash
+		hash = super
+		hash[ :mark ] = @mark
+		hash[ :entity ] = @entity
+		hash
+	end
+
 	def to_s
 		"Android Log Entry { timestamp = #{@timestamp}, level = #{@level}, mark = #{@mark}, tag = #{@tag}, entity = #{@entity}, message = #{@message}, line = #{@line} }"
 	end
@@ -143,7 +150,7 @@ class Entity
 end
 
 
-class EntityStartLogEntry < Entry
+class EntityStartLogEntry < LogEntry
 	attr_reader :target_entity
 
 
@@ -176,7 +183,7 @@ class LogParser < SS::Log::Parser
 			context[ :mark ] = mark
 			mark
 		else
-			Entry.new( context[ :mark ] ).read( line )
+			LogEntry.new( context[ :mark ] ).read( line )
 		end
 	end
 
@@ -190,6 +197,8 @@ class ApkLogContext < SS::Log::ParserContext
 
 	def initialize
 		@target_packages = []
+		@target_package_regexps = {}
+		@messages_before_start = {}
 	end
 
 	def reset
@@ -204,20 +213,25 @@ class ApkLogContext < SS::Log::ParserContext
 	def <<( entry )
 		if entry.nil? then
 		elsif entry.kind_of?( EntityStartLogEntry ) then
-			# service start
+			# entity start
 			package_name = entry.target_entity.package_name
 			unless @system_process then
 				name = entry.entity.package_name ? entry.entity.package_name: 'system_process'
 				@system_process = Entity.new( entry.entity.pid, name, nil, nil )
 			end
-#puts "A-0; ##{entry.line.number}; #{entry.target_entity.package_name}<br>"
-			if @target_packages.include?( entry.target_entity.package_name ) then
-#puts "A-1; ##{entry.line.number}; #{entry.target_entity.package_name}"
-				if @entities[ entry.target_entity.package_name ] then
+#puts "A-0; ##{entry.line.number}; #{package_name}<br>"
+			if @target_packages.include?( package_name ) then
+#puts "A-1; ##{entry.line.number}; #{package_name}"
+				if @entities[ package_name ] then
 					# duplicated ... restart ?
 				end
-#puts "A-2; ##{entry.line.number}; #{entry.target_entity.package_name}"
-				@entities[ entry.target_entity.package_name ] = entry.target_entity
+#puts "A-2; ##{entry.line.number}; #{package_name}"
+				@entities[ package_name ] = entry.target_entity
+				if @messages_before_start[ package_name ] then
+					@temp = @messages_before_start[ package_name ]
+					@messages_before_start[ package_name ] = nil
+					write
+				end
 				if @last_pid and @last_pid != entry.target_entity.pid then
 #puts "A-3; ##{entry.line.number}"
 					write
@@ -232,6 +246,25 @@ class ApkLogContext < SS::Log::ParserContext
 				if entry.entity.pid == s.pid or entry.entity.package_name == s.package_name then
 					entity = entry.entity
 					break
+				end
+			end
+			unless entity then
+				@target_packages.each do |p|
+					if @target_package_regexps.nil? or @target_package_regexps[ p ].nil? then
+						@target_package_regexps ||= {}
+						@target_package_regexps[ p ] ||= []
+						@target_package_regexps[ p ] << Regexp.new( "[^a-zA-Z_0-9]+#{p}[^a-zA-Z_0-9]+" )
+						@target_package_regexps[ p ] << Regexp.new( "^#{p}[^a-zA-Z_0-9]+" )
+						@target_package_regexps[ p ] << Regexp.new( "[^a-zA-Z_0-9]+#{p}$" )
+					end
+					@target_package_regexps[ p ].each do |regexp|
+						if entry.message =~ regexp then
+#puts "#{entry.line.text}"
+							@messages_before_start[ p ] ||= []
+							@messages_before_start[ p ] << entry
+							break
+						end
+					end
 				end
 			end
 #			unless entity then
@@ -331,23 +364,15 @@ HTML
 end
 
 
-class Store < SS::Log::ParserContext
-	require 'sqlite3'
+class Store < SS::Log::Store
 
-
-	def initialize
-		@limit = 1000
+	def initialize( path = "android_log.db" )
+		super path
 	end
 
-	def reset
-		super
-
-		@counter = 0
-		@db = nil
-		@db = SQLite3::Database.new( "android_log.db" )
-
+	def create
 		@db.execute <<SQL
-CREATE TABLE log (
+CREATE TABLE IF NOT EXISTS log (
 line_no,
 line,
 at,
@@ -363,28 +388,21 @@ message
 SQL
 
 		@db.execute <<SQL
-CREATE TABLE entity (
+CREATE TABLE IF NOT EXISTS entity (
 pid,
 package_name,
 name,
 type
 );
 SQL
-
-		@in_transaction = false
 	end
 
-	def <<( entry )
-		unless @in_transaction then
-			@db.transaction
-			@in_transaction = true
-		end
-
+	def insert( entry )
 		if entry.kind_of?( EntityStartLogEntry ) then
 			@db.execute "INSERT INTO entity (pid, package_name, name, type) VALUES (?, ?, ?, ?)",
 				entry.target_entity.pid,
 				entry.target_entity.package_name,
-				entry.target_entity.name
+				entry.target_entity.name,
 				entry.target_entity.type
 			@counter += 1
 		end
@@ -392,32 +410,17 @@ SQL
 		@db.execute "INSERT INTO log (line_no, line, at, entity_pid, entity_package_name, entity_name, entity_type, mark, tag, level, message) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			entry.line.number,
 			entry.line.text,
-			entry.timestamp,
+			entry.timestamp ? entry.timestamp.strftime("%Y-%m-%d %H:%M:%S"): nil,
 			entry.entity ? entry.entity.pid: nil,
 			entry.entity ? entry.entity.package_name: nil,
 			entry.entity ? entry.entity.name: nil,
 			entry.entity ? entry.entity.type: nil,
-			entry.mark.to_s,
+			entry.mark ? entry.mark.to_s: nil,
 			entry.tag,
-			entry.level.to_s,
+			entry.level ? entry.level.to_s: nil,
 			entry.message
 
-		@counter += 1
-		if @counter >= @limit then
-			@db.commit
-			@counter = 0
-			@in_transaction = false
-		end
-
 		self
-	end
-
-	def commit
-		if @counter > 0 then
-			@db.commit
-			@counter = 0
-		end
-		@db.close
 	end
 
 end
@@ -450,6 +453,7 @@ def main( args )
 	include SS::Android
 
 	option = SS::CommandLine::Option.new( args ).parse
+#p option
 
 #	format = option.of( 'format' )
 
@@ -462,27 +466,30 @@ def main( args )
 
 	context = nil
 	output = option.of( 'output' )
-	output.each do |o|
-		case output
-		when "html"
-			context = ApkLogContext.new
-
-			package_names = option.of( 'package-names' )
-			if package_names then
-				package_names.each do |name|
-					context.target_packages << name
+	if output then
+		context = SS::Log::MultiParserContext.new
+		output.each do |o|
+			case o
+			when "html"
+				c = ApkLogContext.new
+				package_names = option.of( 'package-names' )
+				if package_names then
+					package_names.each do |name|
+						c.target_packages << name
+					end
+					c.target_packages << 'system_process'
 				end
+				context + c
+			when "db"
+				c = Store.new
+				context + c
 			else
-				context.target_packages << 'x.x.x'
-				context.target_packages << 'y.y.y'
-				context.target_packages << 'system_process'
+				raise
 			end
-		when "db"
-			context = Store.new
-		else
-			context = Store.new
 		end
-	end if output
+	else
+		context = Store.new
+	end
 
 	input = option.of( 'input' )
 	connect = option.of( 'connect' )
