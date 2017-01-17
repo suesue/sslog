@@ -193,9 +193,13 @@ end
 class ApkLogContext < SS::Log::ParserContext
 	attr_reader :target_packages
 	attr_reader :system_process
+	attr_reader :entities
+	attr_reader :last_pid
+	attr_accessor :printer
 
 
 	def initialize
+		@printer = NullPrinter.new
 		@target_packages = []
 		@target_package_regexps = {}
 		@messages_before_start = {}
@@ -203,11 +207,9 @@ class ApkLogContext < SS::Log::ParserContext
 
 	def reset
 		super
+		@printer.reset
 		@entities = {}
-		@temp = []
 		@last_pid = nil
-		@last_block_number = 1
-		@html = ""
 	end
 
 	def <<( entry )
@@ -228,16 +230,16 @@ class ApkLogContext < SS::Log::ParserContext
 #puts "A-2; ##{entry.line.number}; #{package_name}"
 				@entities[ package_name ] = entry.target_entity
 				if @messages_before_start[ package_name ] then
-					@temp = @messages_before_start[ package_name ]
+					@printer + @messages_before_start[ package_name ]
 					@messages_before_start[ package_name ] = nil
-					write
+					@printer.print
 				end
 				if @last_pid and @last_pid != entry.target_entity.pid then
 #puts "A-3; ##{entry.line.number}"
-					write
+					@printer.print
 				end
 				@last_pid = entry.target_entity.pid
-				@temp << entry
+				@printer << entry
 			end
 		else
 #puts "B-0; ##{entry.line.number}"
@@ -280,20 +282,80 @@ class ApkLogContext < SS::Log::ParserContext
 #puts "B-2 #{entry.line.number}: entity = #{entity}"
 				if @last_pid and @last_pid != entity.pid then
 #puts "B-4 #{entry.line.number}"
-					write
+					@printer.print
 				end
 				@last_pid = entity.pid
-				@temp << entry
+				@printer << entry
 			end
 		end
 		self
 	end
 
-	def write
+	def commit
+		@printer.flush
+	end
+
+end
+
+
+class NullPrinter
+	attr_accessor :context
+
+
+	def reset
+		self
+	end
+
+	def +( data )
+		self
+	end
+
+	def <<( data )
+		self
+	end
+
+	def empty?
+		true
+	end
+
+	def print
+		self
+	end
+
+	def flush
+		self
+	end
+
+end
+
+
+class HTMLPrinter < NullPrinter
+
+	def reset
+		@last_block_number = 1
+		@temp = []
+		@html = ""
+		self
+	end
+
+	def +( data )
+		self
+	end
+
+	def <<( data )
+		@temp << data
+		self
+	end
+
+	def empty?
+		@temp.empty?
+	end
+
+	def print
 		@html += "<tr><td align=\"right\">#{@last_block_number}</td>"
 #f = false
-		@target_packages.each do |name|
-			if @entities[ name ] and @entities[ name ].pid == @last_pid then
+		context.target_packages.each do |name|
+			if context.entities[ name ] and context.entities[ name ].pid == context.last_pid then
 				@html += '<td><pre>'
 				@temp.each do |t|
 					@html += t.line.text.gsub( /\r\n\r\n/, "\r\n" ).gsub( /\r\r/, "\r" ).gsub( /\n\n/, "\n" ).gsub( /</, "&lt;" ).gsub( />/, "&gt;" )
@@ -308,14 +370,15 @@ class ApkLogContext < SS::Log::ParserContext
 		@html += '</tr>'
 		@last_block_number += 1
 		@temp = []
+		self
 	end
 
-	def commit
-		write unless @temp.empty?
-
+	def flush
+		print unless empty?
 		print_head
 		puts @html
 		print_tail
+		self
 	end
 
 	def print_head
@@ -335,11 +398,11 @@ class ApkLogContext < SS::Log::ParserContext
 	<td>#</td>
 HTML
 
-		@target_packages.each do |name|
-			if @entities[ name ] and @entities[ name ].pid then
-				puts "<td>#{name}<br>(#{@entities[name].pid})</td>"
+		context.target_packages.each do |name|
+			if context.entities[ name ] and context.entities[ name ].pid then
+				puts "<td>#{name}<br>(#{context.entities[name].pid})</td>"
 			elsif @system_process and @system_process.package_name == name then
-				puts "<td>#{name}<br>(#{@system_process.pid})</td>"
+				puts "<td>#{name}<br>(#{context.system_process.pid})</td>"
 			else
 				puts "<td>#{name}<br>(?)</td>"
 			end
@@ -349,6 +412,7 @@ HTML
 </thead>
 <tbody>
 HTML
+		self
 	end
 
 	def print_tail
@@ -359,6 +423,69 @@ HTML
 
 </html>
 HTML
+		self
+	end
+
+end
+
+
+class HTMLPrinter2 < HTMLPrinter
+
+	def print_head
+		puts <<HTML
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta charset="utf-8">
+	<title>Android Log</title>
+</head>
+
+<body>
+<table border="0">
+<thead>
+<tr>
+	<th>#</th>
+	<th>time</th>
+	<th>level</th>
+	<th>tag</th>
+HTML
+
+		context.target_packages.each do |name|
+			if context.entities[ name ] and context.entities[ name ].pid then
+				puts "<td>#{name}<br>(#{context.entities[name].pid})</td>"
+			elsif @system_process and @system_process.package_name == name then
+				puts "<td>#{name}<br>(#{context.system_process.pid})</td>"
+			else
+				puts "<td>#{name}<br>(?)</td>"
+			end
+		end
+		puts <<HTML
+</tr>
+</thead>
+<tbody>
+HTML
+		self
+	end
+
+	def print
+		@temp.each do |t|
+			@html += "<tr><td align=\"right\">#{@last_block_number}</td>"
+			@html += "<td>#{t.timestamp.strftime('%Y/%m/%d %H:%M:%S')}</td>"
+			@html += "<td>#{t.level}</td>"
+			@html += "<td>#{t.tag}</td>"
+			context.target_packages.each do |name|
+				if context.entities[ name ] and context.entities[ name ].pid == context.last_pid then
+					@html += "<td><tt>#{t.message.gsub(/</,'&lt;').gsub(/>/,'&gt;')}</tt></td>"
+				else
+					@html += "<td></td>"
+				end
+			end
+			@html += "</tr>"
+		end
+		@last_block_number += 1
+		@temp = []
+		self
 	end
 
 end

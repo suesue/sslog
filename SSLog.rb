@@ -307,12 +307,51 @@ class MultiParserContext < ParserContext
 		self
 	end
 
+	def discard
+		@list.each do |context|
+			context.discard
+		end if @list
+		self
+	end
+
+	def stay( entry = nil )
+		@list.each do |context|
+			context.stay entry
+		end if @list
+		self
+	end
+
+	def append( line )
+		@list.each do |context|
+			context.append line
+		end if @list
+		self
+	end
+
+	def forward( entry = nil )
+		@list.each do |context|
+			context.forward entry
+		end if @list
+		self
+	end
+
 	def <<( entry )
-		return self unless @list
 		@list.each do |context|
 			context << entry
-		end
+		end if @list
 		self
+	end
+
+	def new_entry
+		@list.each do |context|
+			begin
+				entry = context.new_entry
+				return entry if entry
+			rescue => e
+				puts "#{e}"
+			end
+		end if @list
+		raise
 	end
 
 	def commit
