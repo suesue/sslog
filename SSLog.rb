@@ -9,6 +9,7 @@ module Text
 class Line
 	attr_reader :input
 	attr_reader :number
+	attr_reader :raw
 	attr_reader :text
 
 
@@ -17,7 +18,8 @@ class Line
 		raise unless text
 		@input = input
 		@number = number
-		@text = text
+		@raw = text
+		@text = text.scrub( "?" )
 	end
 
 	def +( value )
